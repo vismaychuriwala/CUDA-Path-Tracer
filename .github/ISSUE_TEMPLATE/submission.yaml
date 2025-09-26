@@ -1,0 +1,75 @@
+name: Project 3 Submission
+description: Use this template to add information about your project
+title: "Project 3: Your Name"
+body:
+  - type: input
+    id: repo-link
+    attributes:
+      label: Repo Link
+      description: Add a link to your project repository.
+    validations:
+      required: true
+  - type: textarea
+    id: base-features
+    attributes:
+      label: Core Features Completed
+      description: List of core features completed https://github.com/CIS5650-Fall-2025/Project3-CUDA-Path-Tracer/blob/main/INSTRUCTION.md#part-1---core-features
+      placeholder: |
+        Examples:
+        - [ ] Shading kernel with BSDF evaluation (diffuse, perfect specular surfaces)
+        - [ ] Stream compacted path termination
+        - [ ] Sorting by material type
+        - [ ] Stochastic sampled antialiasing
+    validations:
+      required: true
+  - type: textarea
+    id: extended-features
+    attributes:
+      label: Extended features implemented
+      description: List the extended features implemented from https://github.com/CIS5650-Fall-2025/Project3-CUDA-Path-Tracer/blob/main/INSTRUCTION.md#part-2---make-your-pathtracer-unique
+      placeholder: |
+        Example:
+        - Visual Improvements
+            - Refraction
+            - ....
+        - Mesh Improvements
+            - glTF Support
+            - ....
+        - Performance Improvements
+            - BVH
+            - ...
+        - Other Improvements
+            - ....
+    validations:
+      required: true
+  - type: textarea
+    id: other-features
+    attributes:
+      label: Other Features and Details
+      description: Include any other features and details that you implemented. Include information about libraries added/modified/removed, command line changes, scene file changes, or anything else that is signficiant to your project for grading.
+  - type: checkboxes
+    id: completion-checklist
+    attributes:
+      label: README Submission Checklist
+      description: Checklist to ensure submission is complete
+      options:
+        - label: Cover image in readme does not use Cornell Box
+        - label: Descriptions, screenshots, debug images, side-by-side comparisons of features implemented
+        - label: Analysis
+        - label: Scenes and meshes included or linked
+        - label: Third-party library changes or compilation changes documented
+        - label: Bloopers (optional)
+  - type: input
+    id: late-days
+    attributes:
+      label: Late Days Used
+      description: Add number of late days used
+    validations:
+      required: true
+  - type: textarea
+    id: project-feedback
+    attributes:
+      label: Project feedback
+      description: Add any project feedback to help make the project better.
+      validations:
+        required: true
