@@ -1,8 +1,10 @@
----
-name: Project 3 Submission
-about: Use this template to add information about your project
-title: "Project 3: Your Name"
----
+<!--
+Use this template to create pull requests for your projects as part of your submission.
+
+Title your Pull Request as "Project 3: Your Name" 
+
+Diligently go over the project instructions https://github.com/CIS5650-Fall-2025/Project3-CUDA-Path-Tracer/blob/main/INSTRUCTION.md as part of your submission.
+-->
 
 ### Repo Link
 
