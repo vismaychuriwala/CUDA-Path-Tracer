@@ -71,5 +71,5 @@ body:
     attributes:
       label: Project feedback
       description: Add any project feedback to help make the project better.
-      validations:
-        required: true
+    validations:
+      required: true
