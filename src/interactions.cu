@@ -58,7 +58,6 @@ __host__ __device__ void scatterRay(
     const Material &m,
     thrust::default_random_engine &rng)
 {
-
     float EPS = 0.001f;
     pathSegment.ray.origin = intersect + normal * EPS;
 

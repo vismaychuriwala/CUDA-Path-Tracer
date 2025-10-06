@@ -37,7 +37,9 @@
         "FILE":"cornell",
         "EYE":[0.0,5.0,10.5],
         "LOOKAT":[0.0,5.0,0.0],
-        "UP":[0.0,1.0,0.0]
+        "UP":[0.0,1.0,0.0],
+        "FOCAL_DISTANCE":8.0,
+        "LENS_RADIUS":0.2
     },
     "Objects":
     [

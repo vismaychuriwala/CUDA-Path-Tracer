@@ -152,6 +152,23 @@ void pathtraceFree()
     checkCUDAError("pathtraceFree");
 }
 
+__device__ glm::vec2 concentricSampleDisk(float u1, float u2) {
+    float sx = 2.0f * u1 - 1.0f;
+    float sy = 2.0f * u2 - 1.0f;
+
+    if (sx == 0.0f && sy == 0.0f) return glm::vec2(0.0f);
+
+    float r, theta;
+    if (fabsf(sx) > fabsf(sy)) {
+        r = sx;
+        theta = (PI / 4) * (sy / sx);
+    } else {
+        r = sy;
+        theta = (PI / 2) - (PI / 4) * (sx / sy);
+    }
+    return glm::vec2(r * cosf(theta), r * sinf(theta));
+}
+
 /**
 * Generate PathSegments with rays from the camera through the screen into the
 * scene, which is the first bounce of rays.
@@ -181,11 +198,39 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         jitterY = fminf(fmaxf(jitterY, -0.5f), 0.5f);
         float px = (float)x + jitterX;
         float py = (float)y + jitterY;
-        segment.ray.direction = glm::normalize(cam.view
+        glm::vec3 dir_pinhole = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * (px - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * (py - (float)cam.resolution.y * 0.5f)
         );
 
+
+        glm::vec3 rayOrigin = cam.position;
+        glm::vec3 rayDir = dir_pinhole;
+
+        if (cam.lensRadius > 0.0f) {
+            // Uniform randoms using your thrust RNG
+            thrust::uniform_real_distribution<float> uni01(0.0f, 1.0f);
+            float r1 = uni01(rng);
+            float r2 = uni01(rng);
+
+            // compute focal point along the pinhole ray: find t so that camera + t*dir_pinhole lies
+            // on plane at distance focalDistance along cam.view.
+            // Assumes cam.view is normalized.
+            float denom = glm::dot(dir_pinhole, cam.view);
+            // avoid /0
+            denom = (fabsf(denom) < 1e-6f) ? 1e-6f * (denom >= 0.0f ? 1.0f : -1.0f) : denom;
+            float t_focus = cam.focalDistance / denom;
+            glm::vec3 p_focus = cam.position + dir_pinhole * t_focus;
+
+            // sample lens disk and offset origin
+            glm::vec2 lensSample = concentricSampleDisk(r1, r2) * cam.lensRadius;
+            rayOrigin = cam.position + cam.right * lensSample.x + cam.up * lensSample.y;
+
+            // new direction goes from sampled lens point to focal point
+            rayDir = glm::normalize(p_focus - rayOrigin);
+        }
+        segment.ray.origin = rayOrigin;
+        segment.ray.direction = rayDir;
         segment.pixelIndex = index;
         segment.remainingBounces = traceDepth;
     }
