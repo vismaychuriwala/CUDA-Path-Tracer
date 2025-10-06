@@ -44,6 +44,13 @@ __host__ __device__ glm::vec3 calculateRandomDirectionInHemisphere(
         + sin(around) * over * perpendicularDirection2;
 }
 
+__host__ __device__ inline float fresnelSchlick(float cosTheta, float etaI, float etaT)
+{
+    float r0 = (etaI - etaT) / (etaI + etaT);
+    r0 = r0 * r0;
+    return r0 + (1.0f - r0) * powf(1.0f - cosTheta, 5.0f);
+}
+
 __host__ __device__ void scatterRay(
     PathSegment & pathSegment,
     glm::vec3 intersect,
@@ -51,7 +58,93 @@ __host__ __device__ void scatterRay(
     const Material &m,
     thrust::default_random_engine &rng)
 {
-    // TODO: implement this.
-    // A basic implementation of pure-diffuse shading will just call the
-    // calculateRandomDirectionInHemisphere defined above.
+
+    float EPS = 0.001f;
+    pathSegment.ray.origin = intersect + normal * EPS;
+
+    // Purely Diffuse
+    if (m.hasReflective == 0 && m.hasRefractive == 0.0) {
+        glm::vec3 diffuseDirection = calculateRandomDirectionInHemisphere(normal, rng);
+        pathSegment.ray.direction = diffuseDirection;
+        pathSegment.color *= m.color;
+    }
+
+    // Reflective
+    else if (m.hasReflective != 0.0f && m.hasRefractive == 0.0f)
+    {
+        float roughness = 1.0f - m.hasReflective;
+        float diffuseLuma  = glm::dot(m.color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+        float specularLuma = glm::dot(m.specular.color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+
+        // Weighted by roughness
+        specularLuma *= (1.0f - roughness);  // stronger reflection when smoother
+        diffuseLuma  *= (roughness + 0.2f);  // add small base to avoid pure mirror
+
+        float sum = diffuseLuma + specularLuma + 1e-6f;
+        float p_diffuse  = diffuseLuma / sum;
+
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        float r = u01(rng);
+
+        // Diffuse branch
+        if (r < p_diffuse)
+        {
+            glm::vec3 diffuseDirection = calculateRandomDirectionInHemisphere(normal, rng);
+            pathSegment.ray.direction = diffuseDirection;
+            pathSegment.color *= m.color;
+        }
+        // Reflection Branch
+        else {
+            glm::vec3 reflectDir = glm::reflect(pathSegment.ray.direction, normal);
+            // Set new ray
+            pathSegment.ray.direction = glm::normalize(reflectDir);
+
+            // Multiply throughput by specular color
+            pathSegment.color *= m.specular.color;
+        }
+    }
+
+    // Refractive
+    if (m.hasRefractive != 0.0f) {
+
+        float iorFrom = 1.0f; // medium - air
+        float iorTo   = m.indexOfRefraction;
+
+        glm::vec3 I = pathSegment.ray.direction;
+        float cosThetaI = glm::dot(-I, normal);
+
+        bool entering = cosThetaI > 0.0f;
+        // If not entering, flip normal and swap iors
+        if (!entering) {
+            normal = -normal;
+            cosThetaI = glm::dot(-I, normal); // recompute (now positive)
+            iorFrom = iorTo;
+            iorTo = 1.0f;
+        }
+
+        float eta = iorFrom / iorTo;
+
+        // Fresnel reflectance
+        float reflectProb = fresnelSchlick(cosThetaI, iorFrom, iorTo);
+        thrust::uniform_real_distribution<float> u01(0, 1);
+        float rrand = u01(rng);
+
+        glm::vec3 refractedDir = glm::refract(I, normal, eta);
+        bool tir = glm::length(refractedDir) < 1e-8f; // treat near-zero as TIR
+
+        if (tir || rrand < reflectProb) {
+            // Reflect
+            glm::vec3 reflectDir = glm::reflect(I, normal);
+            pathSegment.ray.direction = glm::normalize(reflectDir);
+            pathSegment.ray.origin = intersect + normal * EPS;
+            pathSegment.color *= m.specular.color;
+        } else {
+            // Refract
+            pathSegment.ray.direction = glm::normalize(refractedDir);
+            pathSegment.ray.origin = intersect - normal * EPS;
+            pathSegment.color *= m.color; // or m.transmission if available
+        }
+    }
+
+    pathSegment.remainingBounces--;
 }

@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "chrono": "cpp",
+        "optional": "cpp",
+        "system_error": "cpp",
+        "tuple": "cpp"
+    }
+}
