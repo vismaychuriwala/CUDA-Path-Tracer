@@ -18,7 +18,7 @@ __host__ __device__ float boxIntersectionTest(
     for (int xyz = 0; xyz < 3; ++xyz)
     {
         float qdxyz = q.direction[xyz];
-        /*if (glm::abs(qdxyz) > 0.00001f)*/
+        // if (glm::abs(qdxyz) > 0.00001f)
         {
             float t1 = (-0.5f - q.origin[xyz]) / qdxyz;
             float t2 = (+0.5f - q.origin[xyz]) / qdxyz;
@@ -108,6 +108,69 @@ __host__ __device__ float sphereIntersectionTest(
     {
         normal = -normal;
     }
+
+    return glm::length(r.origin - intersectionPoint);
+}
+
+__host__ __device__ float triangleIntersectionTest(
+    Geom tri,
+    Ray r,
+    glm::vec3 &intersectionPoint,
+    glm::vec3 &normal,
+    bool &outside)
+{
+    Ray q;
+
+    q.origin = multiplyMV(tri.inverseTransform, glm::vec4(r.origin, 1.0f));
+    q.direction = glm::normalize(multiplyMV(tri.inverseTransform, glm::vec4(r.direction, 0.0f)));
+
+    glm::vec3 v0 = tri.v0;
+    glm::vec3 v1 = tri.v1;
+    glm::vec3 v2 = tri.v2;
+
+    float EPS = 0.000001f;
+    glm::vec3 e1 = v1 - v0;
+    glm::vec3 e2 = v2 - v0;
+
+    glm::vec3 h = glm::cross(q.direction, e2);
+    float a = glm::dot(e1, h);
+
+    if (glm::abs(a) < EPS) {return -1.0f;}  // Ray parallel to triangle
+
+    float f = 1.0f / a;
+    glm::vec3 s = q.origin - v0;
+    float u = f * glm::dot(s, h);
+    if (u < 0.0f || u > 1.0f) {return -1.0f;}
+
+    glm::vec3 qvec = glm::cross(s, e1);
+    float v = f * glm::dot(q.direction, qvec);
+    if (v < 0.0f || (u + v) > 1.0f) {return -1.0f;}
+
+    float t = f * glm::dot(e2, qvec);
+    if (t <= EPS) {return -1.0f;}
+
+    glm::vec3 localIntersect = getPointOnRay(q, t);
+
+    glm::vec3 n;
+    if (glm::length(tri.n0) > 0.0f && glm::length(tri.n1) > 0.0f &&
+        glm::length(tri.n2) > 0.0f)
+    {
+        float w = 1.0f - u - v;
+        n = glm::normalize(w * tri.n0 + u * tri.n1 + v * tri.n2);
+    }
+    else
+    {
+        n = glm::normalize(glm::cross(e1, e2));
+    }
+
+    outside = glm::dot(q.direction, n) < 0.0f;
+    if (!outside)
+        n = -n;
+
+    intersectionPoint =
+        multiplyMV(tri.transform, glm::vec4(localIntersect, 1.0f));
+    normal =
+        glm::normalize(multiplyMV(tri.invTranspose, glm::vec4(n, 0.0f)));
 
     return glm::length(r.origin - intersectionPoint);
 }
