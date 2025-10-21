@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 
+// #define BACKGROUND_COLOR (glm::vec3(0.356, 0.472, 0.609))
 #define BACKGROUND_COLOR (glm::vec3(0.0f))
+
 
 enum GeomType
 {

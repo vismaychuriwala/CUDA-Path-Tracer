@@ -309,8 +309,11 @@ void Scene::loadFromOBJ(const std::string obj_filename, const int override_mater
     auto transformNorm = [&](const glm::vec3& n) {
         return glm::normalize(normalMatrix * n);
     };
+    std::cout << "Number of shapes in " + obj_filename + ": " << obj_shapes.size() << endl;
     // Loop over shapes
     for (size_t s = 0; s < obj_shapes.size(); s++) {
+        std::cout << "Number of triangles: " << obj_shapes[s].mesh.num_face_vertices.size() << endl;
+
         // Loop over faces(polygon) 
         size_t index_offset = 0;
         for (size_t f = 0; f < obj_shapes[s].mesh.num_face_vertices.size(); f++) {
@@ -408,9 +411,6 @@ void Scene::loadFromOBJ(const std::string obj_filename, const int override_mater
     boundingBox.translation, boundingBox.rotation, boundingBox.scale);
     boundingBox.inverseTransform = glm::inverse(boundingBox.transform);
     boundingBox.invTranspose = glm::inverseTranspose(boundingBox.transform);
-    // boundingBox.transform = glm::mat4(1.0f);
-    // boundingBox.inverseTransform = glm::mat4(1.0f);
-    // boundingBox.invTranspose = glm::mat4(1.0f);
     boundingBox.meshID = mesh_ID;
     boundingBox.materialid = 0;
     // geoms.push_back(boundingBox);

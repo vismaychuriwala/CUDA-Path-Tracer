@@ -1,0 +1,125 @@
+{
+    "Materials":
+    {
+        "light": {
+            "TYPE": "Emitting",
+            "RGB": [1.0, 1.0, 1.0],
+            "EMITTANCE": 6.0
+        },
+
+        "wall_glossy": {
+            "TYPE": "Specular",
+            "RGB": [0.18, 0.18, 0.18],
+            "ROUGHNESS": 0.85,
+            "SPECULAR_COLOR": [0.35, 0.35, 0.35]
+        },
+
+        "floor_shiny": {
+            "TYPE": "Specular",
+            "RGB": [0.36, 0.36, 0.36],
+            "ROUGHNESS": 0.66,
+            "SPECULAR_COLOR": [0.70, 0.70, 0.70]
+        },
+
+        "rim_emitter_warm": {
+            "TYPE": "Emitting",
+            "RGB": [1.0, 0.3, 0.15],
+            "EMITTANCE": 3.5
+        },
+
+        "rim_emitter_cool": {
+            "TYPE": "Emitting",
+            "RGB": [0.2, 0.8, 1.0],
+            "EMITTANCE": 3.5
+        },
+
+        "panel_diffuse": {
+            "TYPE": "Diffuse",
+            "RGB": [0.98, 0.98, 0.98]
+        },
+        "refractive_yellow":
+        {
+            "TYPE":"Refractive",
+            "RGB":[1.0, 1.0, 0.02]
+        }
+    },
+    "Camera":
+    {
+        "RES":[800,800],
+        "FOVY":45.0,
+        "ITERATIONS":600,
+        "DEPTH":4,
+        "FILE":"final",
+        "EYE":[0.0,5.0,10.5],
+        "LOOKAT":[0.0,5.0,0.0],
+        "UP":[0.0,1.0,0.0],
+        "FOCAL_DISTANCE":6.0,
+        "LENS_RADIUS":0.3
+    },
+    "Objects":
+    [
+        {
+            "TYPE":"cube",
+            "MATERIAL":"wall_glossy",
+            "TRANS":[0.0,10.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[3.0,0.3,3.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"wall_glossy",
+            "TRANS":[0.0,10.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[23.0,0.3,23.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"rim_emitter_cool",
+            "TRANS":[-7.5,5.0,-1.0],
+            "ROTAT":[0.0,-45.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"wall_glossy",
+            "TRANS":[0.0,5.0,-5.0],
+            "ROTAT":[0.0,90.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+                {
+            "TYPE":"cube",
+            "MATERIAL":"rim_emitter_warm",
+            "TRANS":[7.5,5.0,-1.0],
+            "ROTAT":[0.0,45.0,0.0],
+            "SCALE":[0.01,10.0,10.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"floor_shiny",
+            "TRANS":[0.0,0.0,0.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[50.0,0.01,50.0]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"light",
+            "TRANS":[-50.0,10.0,50.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[53.0,93.0,0.3]
+        },
+        {
+            "TYPE":"cube",
+            "MATERIAL":"light",
+            "TRANS":[50.0,10.0,50.0],
+            "ROTAT":[0.0,0.0,0.0],
+            "SCALE":[53.0,93.0,0.3]
+        },
+        {
+            "TYPE":"mesh",
+	    "FILE": "scenes/models/alienanimal.obj",
+            "TRANS":[0.0,0.0,0.0],
+            "ROTAT":[0.0,30.0,0.0],
+            "SCALE":[0.30,0.30,0.30]
+        }
+    ]
+}

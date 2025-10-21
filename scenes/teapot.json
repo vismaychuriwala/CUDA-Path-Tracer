@@ -91,11 +91,10 @@
         },
         {
             "TYPE":"mesh",
-	    "FILE": "scenes/models/teapot.obj",
-            "MATERIAL":"diffuse_blue",
+	    "FILE": "scenes/models/alienanimal.obj",
             "TRANS":[0.0,0.0,0.0],
             "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[1.0,1.0,1.0]
+            "SCALE":[0.25,0.25,0.25]
         }
     ]
 }

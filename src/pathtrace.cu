@@ -24,7 +24,9 @@
 
 #define ERRORCHECK 1
 #define MAX_MESHES 64
-const bool COALESCED = 0;
+
+#define COALESCED 0
+#define NAIVE 1
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
@@ -93,11 +95,16 @@ static Geom* dev_boundingBoxes;
 // static bool* dev_mesh_in_scope;
 static int num_meshes;
 
+#if !NAIVE
+static float* dev_t_vals = NULL;
+#endif
 
+#if COALESCED
 int* dev_keys = nullptr;
 int* dev_indices = nullptr;
 ShadeableIntersection* dev_inter_tmp;
 PathSegment* dev_paths_tmp;
+#endif
 
 // TODO: static variables for device memory, any extra info you need, etc
 // ...
@@ -130,16 +137,18 @@ void pathtraceInit(Scene* scene)
 
     // TODO: initialize any extra device memory you need
 
-    if (COALESCED) {
+#if COALESCED
         cudaMalloc(&dev_keys, pixelcount * sizeof(int));
         cudaMalloc(&dev_indices, pixelcount * sizeof(int));
         cudaMalloc(&dev_inter_tmp, pixelcount * sizeof(ShadeableIntersection));
         cudaMalloc(&dev_paths_tmp, pixelcount * sizeof(PathSegment));
-    }
+#endif
     num_meshes = scene->boundingBoxes.size();
     cudaMalloc(&dev_boundingBoxes, num_meshes * sizeof(Geom));
     cudaMemcpy(dev_boundingBoxes, scene->boundingBoxes.data(), num_meshes * sizeof(Geom), cudaMemcpyHostToDevice);
-
+#if !NAIVE
+    cudaMalloc(&dev_t_vals, pixelcount * scene->geoms.size() * sizeof(float));
+#endif
     // cudaMalloc(&dev_mesh_in_scope, num_meshes * sizeof(bool));
 }
 
@@ -151,13 +160,16 @@ void pathtraceFree()
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
 
+#if !NAIVE
+    cudaFree(dev_t_vals);
+#endif
     // TODO: clean up any extra device memory you created
-    if (COALESCED) {
+#if COALESCED
         cudaFree(dev_keys);
         cudaFree(dev_indices);
         cudaFree(dev_inter_tmp);
         cudaFree(dev_paths_tmp);
-    }
+#endif
     cudaFree(dev_boundingBoxes);
     // cudaFree(dev_mesh_in_scope);
 
@@ -244,8 +256,135 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
+__global__ void kernComputeTVals(const int geoms_size, const int num_paths, const Geom* geoms, const PathSegment* pathSegments, float* t_vals) {
 
+
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= geoms_size * num_paths) return;
+
+    int geom_index = tid % geoms_size;
+    int path_index = tid / geoms_size;
+
+    PathSegment pathSegment = pathSegments[path_index];
+
+    const int t_index = path_index * geoms_size + geom_index;
+    glm::vec3 tmp_intersect;
+    glm::vec3 tmp_normal;
+    bool outside = true;
+
+    const Geom& geom = geoms[geom_index];
+
+    if (geom.type == CUBE)
+    {
+        t_vals[t_index] = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+    }
+    else if (geom.type == SPHERE)
+    {
+        t_vals[t_index] = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+    }
+    else if (geom.type == TRIANGLE)
+    {
+        // if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
+            t_vals[t_index] = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+        // }
+        // else {
+        //     t = -1.0f;
+        // }
+    }
+    else {
+        t_vals[t_index] = -1.0f;
+    }
+}
+
+// __global__ void kernMinT(const int num_paths, const int geoms_size, const float* t_vals, ShadeableIntersection* intersections, const Geom* geoms, const PathSegment* pathSegments) {
+//     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (path_index >= num_paths) {
+//         return;
+//     }
+    
+// }
+
+#if !NAIVE
 __global__ void computeIntersections(
+    int depth,
+    int num_paths,
+    PathSegment* pathSegments,
+    Geom* geoms,
+    int geoms_size,
+    ShadeableIntersection* intersections,
+    Geom* boundingBoxes,
+    int num_meshes,
+    float* t_vals
+)
+{
+    int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (path_index >= num_paths) {
+        return;
+    }
+    PathSegment pathSegment = pathSegments[path_index];
+    // bool outside = true;
+
+    // glm::vec3 tmp_intersect;
+    // glm::vec3 tmp_normal;
+    // float t_meshes[MAX_MESHES];
+
+    
+    // for (int b = 0; b < num_meshes; b++) {
+    //     Geom& boundingBox = boundingBoxes[b];
+    //     float t_bounds = boxIntersectionTest(boundingBox, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+    //     if (t_bounds < 0.0f) {
+    //         t_meshes[boundingBox.meshID] = -1.0f;
+    //     }
+    //     else {
+    //         t_meshes[boundingBox.meshID] = t_bounds;
+    //     }
+    //     outside = true;
+    // }
+    float t_min = FLT_MAX;
+    int arg_min = -1;
+    for (int geom_index = 0; geom_index < geoms_size; geom_index++) {
+        int t_index = path_index * geoms_size + geom_index;
+        float t = t_vals[t_index];
+        if (t > 0.f && t < t_min) {
+            t_min = t;
+            arg_min = geom_index;
+        }
+    }
+    glm::vec3 intersect;
+    glm::vec3 normal;
+    bool outside = true;
+
+    if (arg_min < 0) {
+        intersections[path_index].t = -1.0f;
+        return;
+    }
+    const Geom& geom = geoms[arg_min];
+
+    float t = -1.0f;
+    if (geom.type == CUBE)
+    {
+        t = boxIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
+    }
+    else if (geom.type == SPHERE)
+    {
+        t = sphereIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
+    }
+    else if (geom.type == TRIANGLE)
+    {
+        // if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
+            t = triangleIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
+        // }
+        // else {
+        //     t = -1.0f;
+        // }
+    }
+    intersections[path_index].t = t;
+    intersections[path_index].materialId = geom.materialid;
+    intersections[path_index].surfaceNormal = normal;
+}
+#else
+__global__ void computeIntersectionsNaive(
     int depth,
     int num_paths,
     PathSegment* pathSegments,
@@ -271,21 +410,21 @@ __global__ void computeIntersections(
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
-        bool mesh_in_scope[MAX_MESHES];
+        float t_meshes[MAX_MESHES];
 
-        // Parse through global geoms
+        
         for (int b = 0; b < num_meshes; b++) {
             Geom& boundingBox = boundingBoxes[b];
             float t_bounds = boxIntersectionTest(boundingBox, pathSegment.ray, tmp_intersect, tmp_normal, outside);
             if (t_bounds < 0.0f) {
-                mesh_in_scope[boundingBox.meshID] = false;
+                t_meshes[boundingBox.meshID] = -1.0f;
             }
             else {
-                mesh_in_scope[boundingBox.meshID] = true;
+                t_meshes[boundingBox.meshID] = t_bounds;
             }
             outside = true;
-
         }
+        // Parse through global geoms
         for (int i = 0; i < geoms_size; i++)
         {
             Geom& geom = geoms[i];
@@ -300,14 +439,13 @@ __global__ void computeIntersections(
             }
             else if (geom.type == TRIANGLE)
             {
-                if (mesh_in_scope[geom.meshID]) {
+                if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
                     t = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
                 }
                 else {
                     t = -1.0f;
                 }
             }
-            // TODO: add more intersection tests here... triangle? metaball? CSG?
 
             // Compute the minimum t from the intersection tests to determine what
             // scene geometry object was hit first.
@@ -333,7 +471,7 @@ __global__ void computeIntersections(
         }
     }
 }
-
+#endif
 __global__ void shadeRealMaterial(
     int iter,
     int num_paths,
@@ -483,9 +621,10 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     int num_paths = dev_path_end - dev_paths;
     // --- PathSegment Tracing Stage ---
     bool iterationComplete = false;
+#if COALESCED
     thrust::device_ptr<int> d_idx(dev_indices);
     thrust::device_ptr<int> d_keys(dev_keys);
-
+#endif
 
     while (!iterationComplete)
     {
@@ -494,17 +633,38 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-        computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>> (
+        const int geoms_size = hst_scene->geoms.size();
+#if NAIVE
+            computeIntersectionsNaive<<<numblocksPathSegmentTracing, blockSize1d>>> (
             depth,
             num_paths,
             dev_paths,
             dev_geoms,
-            hst_scene->geoms.size(),
+            geoms_size,
             dev_intersections,
             dev_boundingBoxes,
-            // dev_mesh_in_scope,
             num_meshes
         );
+#else
+            int totalThreads = geoms_size * num_paths;
+            int blockSize = 128;
+            int numBlocks = (totalThreads + blockSize - 1) / blockSize;
+            kernComputeTVals<<<numBlocks, blockSize>>>(geoms_size, num_paths, dev_geoms, dev_paths, dev_t_vals);
+            checkCUDAError("kernComputerTVals");
+            cudaDeviceSynchronize();
+            computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>> (
+                depth,
+                num_paths,
+                dev_paths,
+                dev_geoms,
+                geoms_size,
+                dev_intersections,
+                dev_boundingBoxes,
+                num_meshes,
+                dev_t_vals
+            );
+            checkCUDAError("compute intersections");
+#endif
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
         depth++;
@@ -518,14 +678,14 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // TODO: compare between directly shading the path segments and shading
         // path segments that have been reshuffled to be contiguous in memory.
 
-        if (COALESCED) {
+# if COALESCED
             kernSetKeys<<<numblocksPathSegmentTracing, blockSize1d>>> (num_paths, dev_keys, dev_intersections);
             thrust::sequence(thrust::device, d_idx, d_idx + num_paths);
             thrust::sort_by_key(thrust::device, d_keys, d_keys + num_paths, d_idx);
             kernGatherArrays<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_indices, dev_inter_tmp, dev_intersections, dev_paths_tmp, dev_paths);
             std::swap(dev_inter_tmp, dev_intersections);
             std::swap(dev_paths_tmp, dev_paths);
-        }
+#endif
 
         shadeRealMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
