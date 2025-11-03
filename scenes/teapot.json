@@ -91,10 +91,10 @@
         },
         {
             "TYPE":"mesh",
-	    "FILE": "scenes/models/alienanimal.obj",
+	    "FILE": "scenes/models/teapot.obj",
             "TRANS":[0.0,0.0,0.0],
             "ROTAT":[0.0,0.0,0.0],
-            "SCALE":[0.25,0.25,0.25]
+            "SCALE":[1.0,1.0,1.0]
         }
     ]
 }
