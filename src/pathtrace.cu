@@ -22,11 +22,15 @@
 #include "interactions.h"
 #include <map>
 
-#define ERRORCHECK 1
+#define ERRORCHECK 0
 #define MAX_MESHES 64
 
 #define COALESCED 0
 #define NAIVE 1
+
+#define EVALUATION 0
+#define JITTER 1
+#define PRINT_RAY_COUNT 0
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
 #define checkCUDAError(msg) checkCUDAErrorFn(msg, FILENAME, __LINE__)
@@ -95,6 +99,18 @@ static Geom* dev_boundingBoxes;
 // static bool* dev_mesh_in_scope;
 static int num_meshes;
 
+#if EVALUATION
+// Performance evaluation timing
+static cudaEvent_t start, stop;
+static bool events_initialized = false;
+static float time_raygen = 0.0f;
+static float time_intersection = 0.0f;
+static float time_sort = 0.0f;
+static float time_shading = 0.0f;
+static float time_compaction = 0.0f;
+static int perf_iter_count = 0;
+#endif
+
 #if !NAIVE
 static float* dev_t_vals = NULL;
 #endif
@@ -150,6 +166,18 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_t_vals, pixelcount * scene->geoms.size() * sizeof(float));
 #endif
     // cudaMalloc(&dev_mesh_in_scope, num_meshes * sizeof(bool));
+
+#if EVALUATION
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    events_initialized = true;
+    time_raygen = 0.0f;
+    time_intersection = 0.0f;
+    time_sort = 0.0f;
+    time_shading = 0.0f;
+    time_compaction = 0.0f;
+    perf_iter_count = 0;
+#endif
 }
 
 void pathtraceFree()
@@ -172,6 +200,14 @@ void pathtraceFree()
 #endif
     cudaFree(dev_boundingBoxes);
     // cudaFree(dev_mesh_in_scope);
+
+#if EVALUATION
+    if (events_initialized) {
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        events_initialized = false;
+    }
+#endif
 
     checkCUDAError("pathtraceFree");
 }
@@ -213,7 +249,8 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         segment.ray.origin = cam.position;
         segment.color = glm::vec3(1.0f, 1.0f, 1.0f);
 
-        // TODO: implement antialiasing by jittering the ray
+#if JITTER
+        // Anti-aliasing by jittering the ray
         thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
         thrust::normal_distribution<float> normal(0.0f, 0.005f);
         float jitterX = normal(rng);
@@ -222,6 +259,10 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         jitterY = fminf(fmaxf(jitterY, -0.5f), 0.5f);
         float px = (float)x + jitterX;
         float py = (float)y + jitterY;
+#else
+        float px = (float)x;
+        float py = (float)y;
+#endif
         glm::vec3 dir_pinhole = glm::normalize(cam.view
             - cam.right * cam.pixelLength.x * (px - (float)cam.resolution.x * 0.5f)
             - cam.up * cam.pixelLength.y * (py - (float)cam.resolution.y * 0.5f)
@@ -232,6 +273,9 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
         glm::vec3 rayDir = dir_pinhole;
 
         if (cam.lensRadius > 0.0f) {
+#if !JITTER
+            thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
+#endif
             // Uniform randoms using your thrust RNG
             thrust::uniform_real_distribution<float> uni01(0.0f, 1.0f);
             float r1 = uni01(rng);
@@ -565,6 +609,47 @@ PathSegment* path_out, const PathSegment* path_in
     }
 }
 
+void printPerformanceStats()
+{
+#if EVALUATION
+    if (perf_iter_count == 0) {
+        printf("No performance data collected yet.\n");
+        return;
+    }
+
+    float avg_raygen = time_raygen / perf_iter_count;
+    float avg_intersection = time_intersection / perf_iter_count;
+    float avg_sort = time_sort / perf_iter_count;
+    float avg_shading = time_shading / perf_iter_count;
+    float avg_compaction = time_compaction / perf_iter_count;
+    float total = avg_raygen + avg_intersection + avg_sort + avg_shading + avg_compaction;
+
+    printf("\n========== Performance Stats (Avg over %d iterations) ==========\n", perf_iter_count);
+    printf("Ray Generation:   %7.3f ms (%5.1f%%)\n", avg_raygen, (avg_raygen/total)*100.0f);
+    printf("Intersection:     %7.3f ms (%5.1f%%)\n", avg_intersection, (avg_intersection/total)*100.0f);
+#if COALESCED
+    printf("Material Sorting: %7.3f ms (%5.1f%%)\n", avg_sort, (avg_sort/total)*100.0f);
+#endif
+    printf("Shading:          %7.3f ms (%5.1f%%)\n", avg_shading, (avg_shading/total)*100.0f);
+    printf("Compaction:       %7.3f ms (%5.1f%%)\n", avg_compaction, (avg_compaction/total)*100.0f);
+    printf("----------------------------------------------------------------\n");
+    printf("TOTAL:            %7.3f ms\n", total);
+    printf("================================================================\n\n");
+#endif
+}
+
+void resetPerformanceStats()
+{
+#if EVALUATION
+    time_raygen = 0.0f;
+    time_intersection = 0.0f;
+    time_sort = 0.0f;
+    time_shading = 0.0f;
+    time_compaction = 0.0f;
+    perf_iter_count = 0;
+#endif
+}
+
 /**
  * Wrapper for the __global__ call that sets up the kernel calls and does a ton
  * of memory management
@@ -613,8 +698,18 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     // * Finally, add this iteration's results to the image. This has been done
     //   for you.
 
+#if EVALUATION
+    cudaEventRecord(start);
+#endif
     generateRayFromCamera<<<blocksPerGrid2d, blockSize2d>>>(cam, iter, traceDepth, dev_paths);
     checkCUDAError("generate camera ray");
+#if EVALUATION
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    time_raygen += milliseconds;
+#endif
 
     int depth = 0;
     PathSegment* dev_path_end = dev_paths + pixelcount;
@@ -626,6 +721,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     thrust::device_ptr<int> d_keys(dev_keys);
 #endif
 
+#if PRINT_RAY_COUNT
+    if (iter == 10) {  // Print after warmup to avoid spam
+        printf("\n[Iter %d] Initial rays: %d\n", iter, num_paths);
+    }
+#endif
+
     while (!iterationComplete)
     {
         // clean shading chunks
@@ -634,6 +735,9 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // tracing
         dim3 numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
         const int geoms_size = hst_scene->geoms.size();
+#if EVALUATION
+        cudaEventRecord(start);
+#endif
 #if NAIVE
             computeIntersectionsNaive<<<numblocksPathSegmentTracing, blockSize1d>>> (
             depth,
@@ -667,6 +771,12 @@ void pathtrace(uchar4* pbo, int frame, int iter)
 #endif
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
+#if EVALUATION
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        time_intersection += milliseconds;
+#endif
         depth++;
 
         // TODO:
@@ -679,14 +789,26 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // path segments that have been reshuffled to be contiguous in memory.
 
 # if COALESCED
+#if EVALUATION
+            cudaEventRecord(start);
+#endif
             kernSetKeys<<<numblocksPathSegmentTracing, blockSize1d>>> (num_paths, dev_keys, dev_intersections);
             thrust::sequence(thrust::device, d_idx, d_idx + num_paths);
             thrust::sort_by_key(thrust::device, d_keys, d_keys + num_paths, d_idx);
             kernGatherArrays<<<numblocksPathSegmentTracing, blockSize1d>>>(num_paths, dev_indices, dev_inter_tmp, dev_intersections, dev_paths_tmp, dev_paths);
             std::swap(dev_inter_tmp, dev_intersections);
             std::swap(dev_paths_tmp, dev_paths);
+#if EVALUATION
+            cudaEventRecord(stop);
+            cudaEventSynchronize(stop);
+            cudaEventElapsedTime(&milliseconds, start, stop);
+            time_sort += milliseconds;
+#endif
 #endif
 
+#if EVALUATION
+        cudaEventRecord(start);
+#endif
         shadeRealMaterial<<<numblocksPathSegmentTracing, blockSize1d>>>(
             iter,
             num_paths,
@@ -695,12 +817,32 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_materials
         );
         cudaDeviceSynchronize();
+#if EVALUATION
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        time_shading += milliseconds;
+#endif
 
         int n = num_paths;
         int blocksGather = (n + blockSize1d - 1) / blockSize1d;
         gatherImage << <blocksGather, blockSize1d >> > (n, dev_image, dev_paths);
         cudaDeviceSynchronize();
+#if EVALUATION
+        cudaEventRecord(start);
+#endif
         num_paths = compactPaths_inplace(dev_paths, num_paths);
+#if EVALUATION
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&milliseconds, start, stop);
+        time_compaction += milliseconds;
+#endif
+#if PRINT_RAY_COUNT
+        if (iter == 10) {  // Print after warmup to avoid spam
+            printf("[Iter %d] After bounce %d: %d rays remaining\n", iter, depth, num_paths);
+        }
+#endif
         if (num_paths == 0) {
             iterationComplete = true;
         }
@@ -724,4 +866,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         pixelcount * sizeof(glm::vec3), cudaMemcpyDeviceToHost);
 
     checkCUDAError("pathtrace");
+
+#if EVALUATION
+    perf_iter_count++;
+#endif
 }

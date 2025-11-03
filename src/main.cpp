@@ -448,6 +448,7 @@ void runCuda()
     {
         pathtraceFree();
         pathtraceInit(scene);
+        resetPerformanceStats();
     }
 
     if (iteration < renderState->iterations)
@@ -462,9 +463,17 @@ void runCuda()
 
         // unmap buffer object
         cudaGLUnmapBufferObject(pbo);
+
+        // Print performance stats every 100 iterations
+        if (iteration % 100 == 0)
+        {
+            printPerformanceStats();
+            resetPerformanceStats();
+        }
     }
     else
     {
+        printPerformanceStats();
         saveImage();
         pathtraceFree();
         cudaDeviceReset();
