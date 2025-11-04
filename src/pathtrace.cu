@@ -21,15 +21,24 @@
 #include "intersections.h"
 #include "interactions.h"
 #include <map>
+#include <algorithm>
 
 #define ERRORCHECK 0
 #define MAX_MESHES 64
+#define TILE_SIZE 64  // Fixed t-array size per ray
 
-#define COALESCED 0
-#define NAIVE 1
+
 
 #define EVALUATION 0
+
+#define NAIVE 1
+#define BOUNDING_BOX 1
+
 #define JITTER 1
+#define DOF 1
+
+#define STREAM_COMPACT 1
+#define COALESCED 0
 #define PRINT_RAY_COUNT 0
 
 #define FILENAME (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -112,7 +121,9 @@ static int perf_iter_count = 0;
 #endif
 
 #if !NAIVE
-static float* dev_t_vals = NULL;
+static float* dev_t_vals = NULL;  // Reusable fixed-size buffer
+static float* dev_min_t = NULL;   // Per-ray minimum t
+static int* dev_min_idx = NULL;   // Per-ray minimum geom index
 #endif
 
 #if COALESCED
@@ -162,8 +173,12 @@ void pathtraceInit(Scene* scene)
     num_meshes = scene->boundingBoxes.size();
     cudaMalloc(&dev_boundingBoxes, num_meshes * sizeof(Geom));
     cudaMemcpy(dev_boundingBoxes, scene->boundingBoxes.data(), num_meshes * sizeof(Geom), cudaMemcpyHostToDevice);
+
 #if !NAIVE
-    cudaMalloc(&dev_t_vals, pixelcount * scene->geoms.size() * sizeof(float));
+    // Allocate fixed-size tile buffer
+    cudaMalloc(&dev_t_vals, pixelcount * TILE_SIZE * sizeof(float));
+    cudaMalloc(&dev_min_t, pixelcount * sizeof(float));
+    cudaMalloc(&dev_min_idx, pixelcount * sizeof(int));
 #endif
     // cudaMalloc(&dev_mesh_in_scope, num_meshes * sizeof(bool));
 
@@ -190,6 +205,8 @@ void pathtraceFree()
 
 #if !NAIVE
     cudaFree(dev_t_vals);
+    cudaFree(dev_min_t);
+    cudaFree(dev_min_idx);
 #endif
     // TODO: clean up any extra device memory you created
 #if COALESCED
@@ -271,7 +288,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
         glm::vec3 rayOrigin = cam.position;
         glm::vec3 rayDir = dir_pinhole;
-
+#if DOF
         if (cam.lensRadius > 0.0f) {
 #if !JITTER
             thrust::default_random_engine rng = makeSeededRandomEngine(iter, index, 0);
@@ -293,6 +310,7 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
 
             rayDir = glm::normalize(p_focus - rayOrigin);
         }
+#endif
         segment.ray.origin = rayOrigin;
         segment.ray.direction = rayDir;
         segment.pixelIndex = index;
@@ -300,129 +318,118 @@ __global__ void generateRayFromCamera(Camera cam, int iter, int traceDepth, Path
     }
 }
 
-__global__ void kernComputeTVals(const int geoms_size, const int num_paths, const Geom* geoms, const PathSegment* pathSegments, float* t_vals) {
-
-
+// Tiled intersection - compute TILE_SIZE geometries at a time
+#if !NAIVE
+__global__ void kernComputeTValsTiled(
+    int tile_start,
+    int tile_size,
+    int geoms_size,
+    int num_paths,
+    const Geom* geoms,
+    const PathSegment* pathSegments,
+    float* t_vals)
+{
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= geoms_size * num_paths) return;
+    if (tid >= tile_size * num_paths) return;
 
-    int geom_index = tid % geoms_size;
-    int path_index = tid / geoms_size;
+    int geom_offset = tid % tile_size;  // Position within tile
+    int path_index = tid / tile_size;
+    int geom_index = tile_start + geom_offset;
 
     PathSegment pathSegment = pathSegments[path_index];
 
-    const int t_index = path_index * geoms_size + geom_index;
+    const int t_index = path_index * TILE_SIZE + geom_offset;
     glm::vec3 tmp_intersect;
     glm::vec3 tmp_normal;
     bool outside = true;
 
+    // Check if this geometry index is out of bounds
+    if (geom_index >= geoms_size) {
+        t_vals[t_index] = -1.0f;
+        return;
+    }
+
     const Geom& geom = geoms[geom_index];
 
-    if (geom.type == CUBE)
-    {
+    if (geom.type == CUBE) {
         t_vals[t_index] = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
     }
-    else if (geom.type == SPHERE)
-    {
+    else if (geom.type == SPHERE) {
         t_vals[t_index] = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
     }
-    else if (geom.type == TRIANGLE)
-    {
-        // if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
-            t_vals[t_index] = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-        // }
-        // else {
-        //     t = -1.0f;
-        // }
+    else if (geom.type == TRIANGLE) {
+        t_vals[t_index] = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
     }
     else {
         t_vals[t_index] = -1.0f;
     }
 }
 
-// __global__ void kernMinT(const int num_paths, const int geoms_size, const float* t_vals, ShadeableIntersection* intersections, const Geom* geoms, const PathSegment* pathSegments) {
-//     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
-//     if (path_index >= num_paths) {
-//         return;
-//     }
-    
-// }
-
-#if !NAIVE
-__global__ void computeIntersections(
-    int depth,
+__global__ void kernFindMinT(
+    int tile_start,
+    int tile_size,
     int num_paths,
-    PathSegment* pathSegments,
-    Geom* geoms,
-    int geoms_size,
-    ShadeableIntersection* intersections,
-    Geom* boundingBoxes,
-    int num_meshes,
-    float* t_vals
-)
+    const float* t_vals,
+    float* global_min_t,
+    int* global_min_idx)
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (path_index >= num_paths) return;
 
-    if (path_index >= num_paths) {
-        return;
-    }
-    PathSegment pathSegment = pathSegments[path_index];
-    // bool outside = true;
+    float min_t = global_min_t[path_index];
+    int min_idx = global_min_idx[path_index];
 
-    // glm::vec3 tmp_intersect;
-    // glm::vec3 tmp_normal;
-    // float t_meshes[MAX_MESHES];
-
-    
-    // for (int b = 0; b < num_meshes; b++) {
-    //     Geom& boundingBox = boundingBoxes[b];
-    //     float t_bounds = boxIntersectionTest(boundingBox, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-    //     if (t_bounds < 0.0f) {
-    //         t_meshes[boundingBox.meshID] = -1.0f;
-    //     }
-    //     else {
-    //         t_meshes[boundingBox.meshID] = t_bounds;
-    //     }
-    //     outside = true;
-    // }
-    float t_min = FLT_MAX;
-    int arg_min = -1;
-    for (int geom_index = 0; geom_index < geoms_size; geom_index++) {
-        int t_index = path_index * geoms_size + geom_index;
+    // Find minimum in this tile
+    for (int i = 0; i < tile_size; i++) {
+        int t_index = path_index * TILE_SIZE + i;
         float t = t_vals[t_index];
-        if (t > 0.f && t < t_min) {
-            t_min = t;
-            arg_min = geom_index;
+        if (t > 0.0f && t < min_t) {
+            min_t = t;
+            min_idx = tile_start + i;  // Global geometry index
         }
     }
-    glm::vec3 intersect;
-    glm::vec3 normal;
-    bool outside = true;
 
-    if (arg_min < 0) {
+    global_min_t[path_index] = min_t;
+    global_min_idx[path_index] = min_idx;
+}
+
+__global__ void kernComputeFinalIntersection(
+    int num_paths,
+    const PathSegment* pathSegments,
+    const Geom* geoms,
+    const float* global_min_t,
+    const int* global_min_idx,
+    ShadeableIntersection* intersections)
+{
+    int path_index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (path_index >= num_paths) return;
+
+    int geom_idx = global_min_idx[path_index];
+    float min_t = global_min_t[path_index];
+
+    if (geom_idx == -1 || min_t >= FLT_MAX) {
         intersections[path_index].t = -1.0f;
         return;
     }
-    const Geom& geom = geoms[arg_min];
 
+    PathSegment pathSegment = pathSegments[path_index];
+    const Geom& geom = geoms[geom_idx];
+
+    glm::vec3 intersect;
+    glm::vec3 normal;
+    bool outside = true;
     float t = -1.0f;
-    if (geom.type == CUBE)
-    {
+
+    if (geom.type == CUBE) {
         t = boxIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
     }
-    else if (geom.type == SPHERE)
-    {
+    else if (geom.type == SPHERE) {
         t = sphereIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
     }
-    else if (geom.type == TRIANGLE)
-    {
-        // if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
-            t = triangleIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
-        // }
-        // else {
-        //     t = -1.0f;
-        // }
+    else if (geom.type == TRIANGLE) {
+        t = triangleIntersectionTest(geom, pathSegment.ray, intersect, normal, outside);
     }
+
     intersections[path_index].t = t;
     intersections[path_index].materialId = geom.materialid;
     intersections[path_index].surfaceNormal = normal;
@@ -454,9 +461,10 @@ __global__ void computeIntersectionsNaive(
 
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
+
+#if BOUNDING_BOX
         float t_meshes[MAX_MESHES];
 
-        
         for (int b = 0; b < num_meshes; b++) {
             Geom& boundingBox = boundingBoxes[b];
             float t_bounds = boxIntersectionTest(boundingBox, pathSegment.ray, tmp_intersect, tmp_normal, outside);
@@ -468,6 +476,7 @@ __global__ void computeIntersectionsNaive(
             }
             outside = true;
         }
+#endif
         // Parse through global geoms
         for (int i = 0; i < geoms_size; i++)
         {
@@ -483,12 +492,16 @@ __global__ void computeIntersectionsNaive(
             }
             else if (geom.type == TRIANGLE)
             {
+#if BOUNDING_BOX
                 if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
                     t = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
                 }
                 else {
                     t = -1.0f;
                 }
+#else
+                t = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+#endif
             }
 
             // Compute the minimum t from the intersection tests to determine what
@@ -526,6 +539,15 @@ __global__ void shadeRealMaterial(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < num_paths)
     {
+        PathSegment &pathSegment = pathSegments[idx];
+
+#if !STREAM_COMPACT
+        // Skip rays that have already been gathered (marked with -1)
+        if (pathSegment.remainingBounces < 0) {
+            return;
+        }
+#endif
+
         ShadeableIntersection intersection = shadeableIntersections[idx];
         if (intersection.t > 0.0f) // if the intersection exists...
         {
@@ -535,7 +557,6 @@ __global__ void shadeRealMaterial(
 
             Material material = materials[intersection.materialId];
             glm::vec3 materialColor = material.color;
-            PathSegment &pathSegment = pathSegments[idx];
 
             // If the material indicates that the object was a light, "light" the ray
             if (material.emittance > 0.0f) {
@@ -551,8 +572,8 @@ __global__ void shadeRealMaterial(
             }
         }
         else {
-            pathSegments[idx].color = BACKGROUND_COLOR;
-            pathSegments[idx].remainingBounces = 0;
+            pathSegment.color = BACKGROUND_COLOR;
+            pathSegment.remainingBounces = 0;
         }
     }
 }
@@ -564,9 +585,13 @@ __global__ void gatherImage(int nPaths, glm::vec3* image, PathSegment* iteration
 
     if (index < nPaths)
     {
-        PathSegment iterationPath = iterationPaths[index];
+        PathSegment& iterationPath = iterationPaths[index];
         if (iterationPath.remainingBounces == 0) {
             image[iterationPath.pixelIndex] += iterationPath.color;
+#if !STREAM_COMPACT
+            // Mark as gathered to prevent double-accumulation when STREAM_COMPACT is off
+            iterationPath.remainingBounces = -1;
+#endif
         }
     }
 }
@@ -622,7 +647,10 @@ void printPerformanceStats()
     float avg_sort = time_sort / perf_iter_count;
     float avg_shading = time_shading / perf_iter_count;
     float avg_compaction = time_compaction / perf_iter_count;
-    float total = avg_raygen + avg_intersection + avg_sort + avg_shading + avg_compaction;
+    float total = avg_raygen + avg_intersection + avg_sort + avg_shading;
+#if STREAM_COMPACT
+    total += avg_compaction;
+#endif
 
     printf("\n========== Performance Stats (Avg over %d iterations) ==========\n", perf_iter_count);
     printf("Ray Generation:   %7.3f ms (%5.1f%%)\n", avg_raygen, (avg_raygen/total)*100.0f);
@@ -631,7 +659,9 @@ void printPerformanceStats()
     printf("Material Sorting: %7.3f ms (%5.1f%%)\n", avg_sort, (avg_sort/total)*100.0f);
 #endif
     printf("Shading:          %7.3f ms (%5.1f%%)\n", avg_shading, (avg_shading/total)*100.0f);
+#if STREAM_COMPACT
     printf("Compaction:       %7.3f ms (%5.1f%%)\n", avg_compaction, (avg_compaction/total)*100.0f);
+#endif
     printf("----------------------------------------------------------------\n");
     printf("TOTAL:            %7.3f ms\n", total);
     printf("================================================================\n\n");
@@ -750,24 +780,36 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             num_meshes
         );
 #else
-            int totalThreads = geoms_size * num_paths;
-            int blockSize = 128;
-            int numBlocks = (totalThreads + blockSize - 1) / blockSize;
-            kernComputeTVals<<<numBlocks, blockSize>>>(geoms_size, num_paths, dev_geoms, dev_paths, dev_t_vals);
-            checkCUDAError("kernComputerTVals");
-            cudaDeviceSynchronize();
-            computeIntersections<<<numblocksPathSegmentTracing, blockSize1d>>> (
-                depth,
-                num_paths,
-                dev_paths,
-                dev_geoms,
-                geoms_size,
-                dev_intersections,
-                dev_boundingBoxes,
-                num_meshes,
-                dev_t_vals
-            );
-            checkCUDAError("compute intersections");
+            // Tiled intersection: process TILE_SIZE geometries at a time
+            // Initialize min arrays
+            thrust::device_ptr<float> d_min_t(dev_min_t);
+            thrust::device_ptr<int> d_min_idx(dev_min_idx);
+            thrust::fill(d_min_t, d_min_t + num_paths, FLT_MAX);
+            thrust::fill(d_min_idx, d_min_idx + num_paths, -1);
+
+            // Process geometries in tiles
+            int num_tiles = (geoms_size + TILE_SIZE - 1) / TILE_SIZE;
+            for (int tile = 0; tile < num_tiles; tile++) {
+                int tile_start = tile * TILE_SIZE;
+                int tile_size = std::min(TILE_SIZE, geoms_size - tile_start);
+
+                // Compute t-values for this tile
+                int totalThreads = tile_size * num_paths;
+                int blockSize = 128;
+                int numBlocks = (totalThreads + blockSize - 1) / blockSize;
+                kernComputeTValsTiled<<<numBlocks, blockSize>>>(
+                    tile_start, tile_size, geoms_size, num_paths, dev_geoms, dev_paths, dev_t_vals);
+
+                // Find minimum within this tile
+                kernFindMinT<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                    tile_start, tile_size, num_paths, dev_t_vals, dev_min_t, dev_min_idx);
+            }
+
+            // Compute final intersection from winning geometry
+            kernComputeFinalIntersection<<<numblocksPathSegmentTracing, blockSize1d>>>(
+                num_paths, dev_paths, dev_geoms, dev_min_t, dev_min_idx, dev_intersections);
+
+            checkCUDAError("compute intersections tiled");
 #endif
         checkCUDAError("trace one bounce");
         cudaDeviceSynchronize();
@@ -828,6 +870,7 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         int blocksGather = (n + blockSize1d - 1) / blockSize1d;
         gatherImage << <blocksGather, blockSize1d >> > (n, dev_image, dev_paths);
         cudaDeviceSynchronize();
+#if STREAM_COMPACT
 #if EVALUATION
         cudaEventRecord(start);
 #endif
@@ -838,12 +881,18 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         cudaEventElapsedTime(&milliseconds, start, stop);
         time_compaction += milliseconds;
 #endif
+#endif
 #if PRINT_RAY_COUNT
         if (iter == 10) {  // Print after warmup to avoid spam
             printf("[Iter %d] After bounce %d: %d rays remaining\n", iter, depth, num_paths);
         }
 #endif
+#if STREAM_COMPACT
         if (num_paths == 0) {
+            iterationComplete = true;
+        }
+#endif
+        if (depth >= traceDepth) {
             iterationComplete = true;
         }
         if (guiData != NULL)
