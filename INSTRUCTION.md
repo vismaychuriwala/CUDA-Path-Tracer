@@ -62,7 +62,7 @@ You will need to implement the following features:
 
 * A shading kernel with BSDF evaluation for:
   * Ideal diffuse surfaces (using provided cosine-weighted scatter function, see below.) [PBRTv4 9.2](https://pbr-book.org/4ed/Reflection_Models/Diffuse_Reflection)
-* After you have a [basic pathtracer up and running](img/REFERENCE_cornell.5000samp.png),
+* After you have a [basic pathtracer up and running](img/reference/REFERENCE_cornell.5000samp.png),
   implement a means of making rays/pathSegments/intersections contiguous in memory by material type. This should be easily toggleable.
   * Consider the problems with coloring every path segment in a buffer and performing BSDF evaluation using one big shading kernel: different materials/BSDF evaluations within the kernel will take different amounts of time to complete.
   * Sort the rays/path segments so that rays/paths interacting with the same material are contiguous in memory before shading. How does this impact performance? Why?
