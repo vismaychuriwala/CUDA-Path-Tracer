@@ -1,6 +1,8 @@
 #include "sceneStructs.h"
 #include <memory>
 
+#define USE_SAH 1
+
 template<typename T>
 using uPtr = std::unique_ptr<T>;
 
@@ -30,73 +32,6 @@ public:
     int flattenBVHTree(int *offset, std::vector<LinearBVHNode>& nodes, std::vector<TriangleVerts> &t) const;
 
 };
-
-// std::optional<Intersection> BVHNode::intersect(const Ray &ray) const {
-//     // TODO: Implement a recursive depth-first search intersection test
-//     // between the ray and the current node.
-
-//     // Base case: The current node is a leaf node (it has no children)
-//     //            Return the intersection with the node's Shape, if there
-//     //            is such an intersection.
-
-//     // Recursive cases: The current node is an inner node, and the ray
-//     //                  intersects the bounding box of one or more of its children.
-//     //                  For efficiency, first traverse the child node with
-//     //                  the nearer bounding-box intersection.
-
-//     if (this->shape) {
-//         std::optional<Intersection> isect = this->shape->intersect(ray);
-//         return isect;
-//     }
-//     if (!this->bbox.intersect(ray)) {
-//         return std::nullopt;
-//     }
-
-//     std::optional<Intersection> rIsect = this->child_R->intersect(ray);
-//     std::optional<Intersection> lIsect = this->child_L->intersect(ray);
-
-//     if(rIsect) {
-//         if (lIsect) {
-//             if (lIsect->t < rIsect->t) {
-//                 return lIsect;
-//             }
-//             else {
-//                 return rIsect;
-//             }
-//         }
-//         else {
-//             return rIsect;
-//         }
-//     }
-//     else {
-//         return lIsect;
-//     }
-
-//     return std::nullopt;
-// }
-
-// Ray-Box intersection test re-implemented for a bounding box
-float BVHBounds::intersect(const Ray &ray) const {
-    glm::vec3 invDir = glm::vec3(1.0) / ray.direction;
-    glm::vec3 near = (this->minCorner - ray.origin) * invDir;
-    glm::vec3 far  = (this->maxCorner - ray.origin) * invDir;
-
-    glm::vec3 tmin = glm::min(near, far);
-    glm::vec3 tmax = glm::max(near, far);
-
-    float t0 = glm::max(glm::max(tmin.x, tmin.y), tmin.z);
-    float t1 = glm::min(glm::min(tmax.x, tmax.y), tmax.z);
-
-    if(t0 > t1) return -1.f;
-    if(t0 > 0.f) { // We're outside the box looking at it
-        return t0;
-    }
-    if(t1 > 0.f) { // We're inside the box looking at one of its sides
-        return t1;
-    }
-    return -1.f;
-}
-
 
 // A helper function you can use to determine what dimension
 // of a bounding box is longest.
@@ -139,6 +74,80 @@ BVHBounds getTriangleBounds(const TriangleVerts& t) {
     return BVHBounds(tPoints);
 }
 
+float BVHBounds::surfaceArea() const {
+    glm::vec3 d = maxCorner - minCorner;
+    return 2.f * (d.x * d.y + d.x * d.z + d.y * d.z);
+}
+
+#if USE_SAH
+
+BVHBounds computeCentroidBounds(std::vector<TriangleVerts> &triangles, int start, int end) {
+    BVHBounds centroidBounds;
+    for (int i = start; i < end; i++) {
+        glm::vec3 c = getCentroid(triangles[i]);
+        centroidBounds = Union(centroidBounds, BVHBounds(c, c));
+    }
+    return centroidBounds;
+}
+
+int bucketSAHSplit(std::vector<TriangleVerts> &triangles, int start, int end,
+                   int axis, const BVHBounds &bounds, const BVHBounds &centroidBounds) {
+    constexpr int nBuckets = 12;
+    struct BucketInfo {
+        int count = 0;
+        BVHBounds bounds;
+    };
+    BucketInfo buckets[nBuckets];
+
+    for (int i = start; i < end; i++) {
+        int b = nBuckets * centroidBounds.Offset(getCentroid(triangles[i]))[axis];
+        if (b == nBuckets) b = nBuckets - 1;
+        buckets[b].count++;
+        buckets[b].bounds = Union(buckets[b].bounds, getTriangleBounds(triangles[i]));
+    }
+
+    float cost[nBuckets - 1];
+    for (int i = 0; i < nBuckets - 1; i++) {
+        BVHBounds b0, b1;
+        int count0 = 0, count1 = 0;
+        for (int j = 0; j <= i; j++) {
+            b0 = Union(b0, buckets[j].bounds);
+            count0 += buckets[j].count;
+        }
+        for (int j = i + 1; j < nBuckets; j++) {
+            b1 = Union(b1, buckets[j].bounds);
+            count1 += buckets[j].count;
+        }
+        cost[i] = 0.125f + (count0 * b0.surfaceArea() + count1 * b1.surfaceArea()) / bounds.surfaceArea();
+    }
+
+    int minCostSplitBucket = 0;
+    float minCost = cost[0];
+    for (int i = 1; i < nBuckets - 1; i++) {
+        if (cost[i] < minCost) {
+            minCost = cost[i];
+            minCostSplitBucket = i;
+        }
+    }
+
+    auto pmid = std::partition(triangles.begin() + start, triangles.begin() + end,
+                               [&](const TriangleVerts& tri) {
+                                   int b = nBuckets * centroidBounds.Offset(getCentroid(tri))[axis];
+                                   if (b == nBuckets) b = nBuckets - 1;
+                                   return b <= minCostSplitBucket;
+                               });
+    int mid = pmid - triangles.begin();
+
+    if (mid == start || mid == end) {
+        mid = (start + end) / 2;
+    }
+
+    return mid;
+}
+
+#endif
+
+
 uPtr<BVHNode> recursiveBVHBuild(std::vector<TriangleVerts> &triangleInfo,
                                 int start, int end, int *numLeafNodes) {
 
@@ -162,13 +171,22 @@ uPtr<BVHNode> recursiveBVHBuild(std::vector<TriangleVerts> &triangleInfo,
     else {
         int axisToExpand = currentLayerBounds.maximumExtent();
         int mid;
+#if USE_SAH
+            BVHBounds centroidBounds = computeCentroidBounds(triangleInfo, start, end);
+            glm::vec3 centroidExtent = centroidBounds.maxCorner - centroidBounds.minCorner;
 
+            if (centroidExtent[axisToExpand] == 0) {
+                mid = (start + end) / 2;
+            } else {
+                mid = bucketSAHSplit(triangleInfo, start, end, axisToExpand, currentLayerBounds, centroidBounds);
+            }
+#else
             std::sort(triangleInfo.begin() + start, triangleInfo.begin() + end,
                         [axisToExpand](const TriangleVerts& a, const TriangleVerts& b) {
                 return getCentroid(a)[axisToExpand] < getCentroid(b)[axisToExpand];
             });
             mid = (start + end) / 2;
-
+#endif
         node->setupInteriorNode(recursiveBVHBuild(triangleInfo, start, mid, numLeafNodes),
                                 recursiveBVHBuild(triangleInfo, mid, end, numLeafNodes));
     }

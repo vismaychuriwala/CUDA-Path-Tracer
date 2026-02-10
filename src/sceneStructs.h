@@ -49,7 +49,7 @@ struct BVHBounds {
     int maximumExtent() const;
     glm::vec3 Offset(const glm::vec3 &p) const;
 
-    float intersect(const Ray &ray) const;
+    float surfaceArea() const;
 };
 
 struct LinearBVHNode {
