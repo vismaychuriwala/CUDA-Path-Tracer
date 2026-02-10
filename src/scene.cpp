@@ -268,7 +268,8 @@ void Scene::loadFromOBJ(const std::string obj_filename, const int override_mater
     std::string warn;
     std::string err;
 
-    bool ret = tinyobj::LoadObj(&attrib, &obj_shapes, &obj_materials, &warn, &err, objPath.string().c_str());
+    std::string mtlBaseDir = objPath.parent_path().string();
+    bool ret = tinyobj::LoadObj(&attrib, &obj_shapes, &obj_materials, &warn, &err, objPath.string().c_str(), mtlBaseDir.c_str());
 
     if (!warn.empty()) {
     std::cout << "Load Obj warn: " << warn << std::endl;

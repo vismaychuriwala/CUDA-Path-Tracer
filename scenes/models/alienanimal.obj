@@ -1,6 +1,6 @@
 # Blender v2.77 (sub 0) OBJ File: 'Alien Animal Actions_Baked_Only_Mesh_and_Bones2.blend'
 # www.blender.org
-mtllib scenes/models/alienanimal.mtl
+mtllib alienanimal.mtl
 o aa_low.001_Cube.007
 v 0.938111 7.339095 14.941772
 v 0.954037 7.230939 14.957028
