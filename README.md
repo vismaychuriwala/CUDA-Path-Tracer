@@ -1,5 +1,6 @@
 # CUDA Path Tracer
-![](img/renders/final.2025-10-13_08-40-00z.600samp.png)
+![](img/renders/alien.2026-02-10_20-53-29z.5000samp.png)
+*Alien creature — 1200×1200, 5000 samples, depth 12, rendered in ~1m 50s*
 
 ---
 * Hi! I am Vismay Churiwala, here are my socials:
@@ -25,6 +26,7 @@
   - [Anti-Aliasing](#anti-aliasing)
   - [Depth of Field](#depth-of-field)
   - [Mesh Loading & Triangle Intersection](#mesh-loading--triangle-intersection)
+  - [BVH Acceleration Structure](#bvh-acceleration-structure)
 - [Performance Testing](#performance-testing)
 - [Future Improvements](#future-improvements)
 - [Bloopers](#bloopers)
@@ -236,9 +238,6 @@ The additional arithmetic and sampling parallelize perfectly across rays. No div
 
 Supports loading OBJ mesh files with triangle intersection using the Möller-Trumbore algorithm.
 
-> [!WARNING]
-> Without a BVH (Bounding Volume Hierarchy), performance drops off dramatically even for relatively small meshes. The teapot (6,320 triangles) takes ~8.7 seconds per frame, and the alien model (46,588 triangles) takes over a minute per frame. A proper BVH acceleration structure is critical for practical mesh rendering.
-
 | Mesh Render | With Bounding Box Visualization |
 | --- | --- |
 | ![Teapot](img/features/teapot.png) | ![Teapot with BBox](img/features/teapot_bounding_box.png) |
@@ -282,6 +281,44 @@ Performance scales roughly linearly with triangle count (~1.4-1.6 ms per triangl
 #### GPU vs CPU
 
 Triangle intersection is embarrassingly parallel - each ray-triangle test is independent. GPUs excel here. The Möller-Trumbore algorithm is branchless (good for SIMD) until the final validation, minimizing divergence.
+
+<br>
+
+### BVH Acceleration Structure
+
+A Bounding Volume Hierarchy (BVH) reduces ray-triangle intersection complexity from O(n) to O(log n) by recursively partitioning geometry into a binary tree of axis-aligned bounding boxes.
+
+#### Implementation
+
+Based on [PBRT v3 §4.3](https://pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies).
+
+The BVH is built recursively on the CPU at scene load time, then **flattened into a compact linear array** for GPU upload. Each node in the linear BVH is a fixed-size struct — internal nodes store the second-child offset, split axis, and AABB; leaf nodes store a triangle index range. This cache-friendly layout avoids pointer chasing during traversal, which is critical for GPU performance. During traversal, the ray marching kernel walks the tree iteratively using a local stack, skipping entire subtrees when the ray misses a node's AABB.
+
+Two build strategies are supported via a compile-time flag:
+
+**Midpoint split**: Partitions triangles at the spatial midpoint of the longest axis. Fast to build, produces a reasonable tree for most scenes.
+
+**Surface Area Heuristic (SAH)**: Chooses the split axis and position that minimizes the expected ray-traversal cost using the formula:
+
+```
+cost = C_traversal + (SA_left / SA_parent) * N_left * C_intersect
+                   + (SA_right / SA_parent) * N_right * C_intersect
+```
+
+SAH evaluates candidate splits across all three axes and picks the lowest-cost partition, producing a tighter tree that reduces redundant node visits.
+
+#### Performance
+
+The table below compares frame time across three configurations. "No BVH" uses a flat AABB bounding the whole mesh and tests all triangles on a hit.
+
+| Mesh | Triangles | No BVH | BVH (midpoint) | BVH (SAH) | SAH Speedup vs No BVH |
+|------|-----------|--------|----------------|-----------|-----------------------|
+| Violin | 2,112 | 2,947 ms | 14 ms | 14 ms | **210×** |
+| Teapot | 6,320 | 8,751 ms | 18 ms | 17 ms | **515×** |
+| Cow | 5,804 | 9,564 ms | 21 ms | 19 ms | **503×** |
+| Alien | 46,588 | 69,540 ms | 24 ms | 22 ms | **3,161×** |
+
+BVH reduces the alien model from **69.5 seconds** to **22 ms** — a 3,161× speedup. SAH provides a modest additional improvement over midpoint splitting (5–13%), with larger gains on irregular geometry like the alien where midpoint splits produce unbalanced subtrees.
 
 <br>
 
@@ -349,10 +386,6 @@ The modest overhead demonstrates that proper light transport is achievable with 
 
 ## Future Improvements
 
-### Critical: BVH Acceleration Structure
-
-Implement a BVH (Bounding Volume Hierarchy) or kd-tree acceleration structure for mesh intersection. The current naive AABB culling still tests all triangles if the ray hits the bounding box, resulting in O(n·m) complexity. A proper BVH would reduce this to O(n·log m), enabling real-time rendering of complex meshes.
-
 ### Rendering Features
 
 - **Texture Mapping**: Add texture coordinate support and UV mapping for textured meshes
@@ -381,6 +414,7 @@ Implement a BVH (Bounding Volume Hierarchy) or kd-tree acceleration structure fo
 
 ## References
 
+- [Physically Based Rendering: From Theory to Implementation, v3 §4.3](https://pbr-book.org/3ed-2018/Primitives_and_Intersection_Acceleration/Bounding_Volume_Hierarchies) - BVH implementation reference
 - [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) - OBJ mesh file parsing library
 - [Alien creature OBJ](https://free3d.com/3d-model/alien-animal-218186.html)
 - [Assorted OBJ meshes (cow, teapot, violin, etc.)](https://people.sc.fsu.edu/~jburkardt/data/obj/obj.html)
