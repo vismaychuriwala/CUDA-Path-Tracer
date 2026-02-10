@@ -104,9 +104,8 @@ static Geom* dev_geoms = NULL;
 static Material* dev_materials = NULL;
 static PathSegment* dev_paths = NULL;
 static ShadeableIntersection* dev_intersections = NULL;
-static Geom* dev_boundingBoxes;
-// static bool* dev_mesh_in_scope;
-static int num_meshes;
+static LinearBVHNode* dev_bvhNodes = NULL;
+static TriangleVerts*  dev_bvhTriangles = NULL;
 
 #if EVALUATION
 // Performance evaluation timing
@@ -162,7 +161,15 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
-    // TODO: initialize any extra device memory you need
+    // BVH data
+    if (!scene->bvhNodes.empty()) {
+        cudaMalloc(&dev_bvhNodes, scene->bvhNodes.size() * sizeof(LinearBVHNode));
+        cudaMemcpy(dev_bvhNodes, scene->bvhNodes.data(), scene->bvhNodes.size() * sizeof(LinearBVHNode), cudaMemcpyHostToDevice);
+    }
+    if (!scene->bvhTriangles.empty()) {
+        cudaMalloc(&dev_bvhTriangles, scene->bvhTriangles.size() * sizeof(TriangleVerts));
+        cudaMemcpy(dev_bvhTriangles, scene->bvhTriangles.data(), scene->bvhTriangles.size() * sizeof(TriangleVerts), cudaMemcpyHostToDevice);
+    }
 
 #if COALESCED
         cudaMalloc(&dev_keys, pixelcount * sizeof(int));
@@ -170,9 +177,6 @@ void pathtraceInit(Scene* scene)
         cudaMalloc(&dev_inter_tmp, pixelcount * sizeof(ShadeableIntersection));
         cudaMalloc(&dev_paths_tmp, pixelcount * sizeof(PathSegment));
 #endif
-    num_meshes = scene->boundingBoxes.size();
-    cudaMalloc(&dev_boundingBoxes, num_meshes * sizeof(Geom));
-    cudaMemcpy(dev_boundingBoxes, scene->boundingBoxes.data(), num_meshes * sizeof(Geom), cudaMemcpyHostToDevice);
 
 #if !NAIVE
     // Allocate fixed-size tile buffer
@@ -208,15 +212,14 @@ void pathtraceFree()
     cudaFree(dev_min_t);
     cudaFree(dev_min_idx);
 #endif
-    // TODO: clean up any extra device memory you created
+    cudaFree(dev_bvhNodes);
+    cudaFree(dev_bvhTriangles);
 #if COALESCED
         cudaFree(dev_keys);
         cudaFree(dev_indices);
         cudaFree(dev_inter_tmp);
         cudaFree(dev_paths_tmp);
 #endif
-    cudaFree(dev_boundingBoxes);
-    // cudaFree(dev_mesh_in_scope);
 
 #if EVALUATION
     if (events_initialized) {
@@ -442,8 +445,8 @@ __global__ void computeIntersectionsNaive(
     Geom* geoms,
     int geoms_size,
     ShadeableIntersection* intersections,
-    Geom* boundingBoxes,
-    int num_meshes
+    LinearBVHNode* bvhNodes,
+    TriangleVerts* bvhTriangles
 )
 {
     int path_index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -462,21 +465,6 @@ __global__ void computeIntersectionsNaive(
         glm::vec3 tmp_intersect;
         glm::vec3 tmp_normal;
 
-#if BOUNDING_BOX
-        float t_meshes[MAX_MESHES];
-
-        for (int b = 0; b < num_meshes; b++) {
-            Geom& boundingBox = boundingBoxes[b];
-            float t_bounds = boxIntersectionTest(boundingBox, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-            if (t_bounds < 0.0f) {
-                t_meshes[boundingBox.meshID] = -1.0f;
-            }
-            else {
-                t_meshes[boundingBox.meshID] = t_bounds;
-            }
-            outside = true;
-        }
-#endif
         // Parse through global geoms
         for (int i = 0; i < geoms_size; i++)
         {
@@ -485,33 +473,35 @@ __global__ void computeIntersectionsNaive(
             if (geom.type == CUBE)
             {
                 t = boxIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                if (t > 0.0f && t < t_min) {
+                    t_min = t;
+                    hit_geom_index = i;
+                    intersect_point = tmp_intersect;
+                    normal = tmp_normal;
+                }
             }
             else if (geom.type == SPHERE)
             {
                 t = sphereIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-            }
-            else if (geom.type == TRIANGLE)
-            {
-#if BOUNDING_BOX
-                if (t_meshes[geom.meshID] > 0 && t_meshes[geom.meshID] <= t_min) {
-                    t = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
+                if (t > 0.0f && t < t_min) {
+                    t_min = t;
+                    hit_geom_index = i;
+                    intersect_point = tmp_intersect;
+                    normal = tmp_normal;
                 }
-                else {
-                    t = -1.0f;
-                }
-#else
-                t = triangleIntersectionTest(geom, pathSegment.ray, tmp_intersect, tmp_normal, outside);
-#endif
             }
-
-            // Compute the minimum t from the intersection tests to determine what
-            // scene geometry object was hit first.
-            if (t > 0.0f && t_min > t)
+            else if (geom.type == MESH)
             {
-                t_min = t;
-                hit_geom_index = i;
-                intersect_point = tmp_intersect;
-                normal = tmp_normal;
+                int matId = -1;
+                t = meshIntersectionTest(geom, pathSegment.ray, bvhNodes, bvhTriangles,
+                                         tmp_intersect, tmp_normal, matId);
+                if (t > 0.0f && t < t_min) {
+                    t_min = t;
+                    hit_geom_index = i;
+                    intersect_point = tmp_intersect;
+                    normal = tmp_normal;
+                    intersections[path_index].materialId = matId;
+                }
             }
         }
 
@@ -521,9 +511,11 @@ __global__ void computeIntersectionsNaive(
         }
         else
         {
-            // The ray hits something
             intersections[path_index].t = t_min;
-            intersections[path_index].materialId = geoms[hit_geom_index].materialid;
+            // materialId already set for MESH; set it here for CUBE/SPHERE
+            if (geoms[hit_geom_index].type != MESH) {
+                intersections[path_index].materialId = geoms[hit_geom_index].materialid;
+            }
             intersections[path_index].surfaceNormal = normal;
         }
     }
@@ -776,8 +768,8 @@ void pathtrace(uchar4* pbo, int frame, int iter)
             dev_geoms,
             geoms_size,
             dev_intersections,
-            dev_boundingBoxes,
-            num_meshes
+            dev_bvhNodes,
+            dev_bvhTriangles
         );
 #else
             // Tiled intersection: process TILE_SIZE geometries at a time

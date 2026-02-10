@@ -112,65 +112,102 @@ __host__ __device__ float sphereIntersectionTest(
     return glm::length(r.origin - intersectionPoint);
 }
 
-__host__ __device__ float triangleIntersectionTest(
-    Geom tri,
-    Ray r,
-    glm::vec3 &intersectionPoint,
-    glm::vec3 &normal,
-    bool &outside)
+// AABB slab test — mirrors BVHBounds::intersect but usable on device
+__device__ static float aabbIntersect(const BVHBounds& bounds, const Ray& r)
 {
-    Ray q;
+    glm::vec3 invDir = glm::vec3(1.0f) / r.direction;
+    glm::vec3 tNear  = (bounds.minCorner - r.origin) * invDir;
+    glm::vec3 tFar   = (bounds.maxCorner - r.origin) * invDir;
+    glm::vec3 tMin   = glm::min(tNear, tFar);
+    glm::vec3 tMax   = glm::max(tNear, tFar);
+    float t0 = glm::max(glm::max(tMin.x, tMin.y), tMin.z);
+    float t1 = glm::min(glm::min(tMax.x, tMax.y), tMax.z);
+    if (t0 > t1)  return -1.f;
+    if (t0 > 0.f) return t0;
+    if (t1 > 0.f) return t1;
+    return -1.f;
+}
 
-    q.origin = multiplyMV(tri.inverseTransform, glm::vec4(r.origin, 1.0f));
-    q.direction = glm::normalize(multiplyMV(tri.inverseTransform, glm::vec4(r.direction, 0.0f)));
+// Möller–Trumbore triangle intersection (world-space vertices, no transform needed)
+__device__ static float triangleIntersect(
+    const TriangleVerts& tri,
+    const Ray& r,
+    glm::vec3& normal)
+{
+    const float EPS = 1e-6f;
+    glm::vec3 e1 = tri.v1 - tri.v0;
+    glm::vec3 e2 = tri.v2 - tri.v0;
 
-    glm::vec3 v0 = tri.v0;
-    glm::vec3 v1 = tri.v1;
-    glm::vec3 v2 = tri.v2;
-
-    float EPS = 0.000001f;
-    glm::vec3 e1 = v1 - v0;
-    glm::vec3 e2 = v2 - v0;
-
-    glm::vec3 h = glm::cross(q.direction, e2);
+    glm::vec3 h = glm::cross(r.direction, e2);
     float a = glm::dot(e1, h);
+    if (glm::abs(a) < EPS) return -1.f;  // ray parallel to triangle
 
-    if (glm::abs(a) < EPS) {return -1.0f;}  // Ray parallel to triangle
-
-    float f = 1.0f / a;
-    glm::vec3 s = q.origin - v0;
+    float f = 1.f / a;
+    glm::vec3 s = r.origin - tri.v0;
     float u = f * glm::dot(s, h);
-    if (u < 0.0f || u > 1.0f) {return -1.0f;}
+    if (u < 0.f || u > 1.f) return -1.f;
 
-    glm::vec3 qvec = glm::cross(s, e1);
-    float v = f * glm::dot(q.direction, qvec);
-    if (v < 0.0f || (u + v) > 1.0f) {return -1.0f;}
+    glm::vec3 q = glm::cross(s, e1);
+    float v = f * glm::dot(r.direction, q);
+    if (v < 0.f || (u + v) > 1.f) return -1.f;
 
-    float t = f * glm::dot(e2, qvec);
-    if (t <= EPS) {return -1.0f;}
+    float t = f * glm::dot(e2, q);
+    if (t < EPS) return -1.f;
 
-    glm::vec3 localIntersect = getPointOnRay(q, t);
+    float w = 1.f - u - v;
+    normal = glm::normalize(w * tri.n0 + u * tri.n1 + v * tri.n2);
+    if (glm::dot(r.direction, normal) > 0.f)
+        normal = -normal;
 
-    glm::vec3 n;
-    if (glm::length(tri.n0) > 0.0f && glm::length(tri.n1) > 0.0f &&
-        glm::length(tri.n2) > 0.0f)
-    {
-        float w = 1.0f - u - v;
-        n = glm::normalize(w * tri.n0 + u * tri.n1 + v * tri.n2);
+    return t;
+}
+
+#define BVH_STACK_SIZE 64
+
+__device__ float meshIntersectionTest(
+    const Geom& mesh,
+    const Ray& r,
+    const LinearBVHNode* bvhNodes,
+    const TriangleVerts* bvhTriangles,
+    glm::vec3& intersectionPoint,
+    glm::vec3& normal,
+    int& materialId)
+{
+    float tMin = FLT_MAX;
+    glm::vec3 hitNormal(0.f);
+
+    int stack[BVH_STACK_SIZE];
+    int stackPtr = 0;
+    stack[stackPtr++] = mesh.rootNodeIdx;
+
+    while (stackPtr > 0) {
+        int idx = stack[--stackPtr];
+        const LinearBVHNode& node = bvhNodes[idx];
+
+        float boxT = aabbIntersect(node.bounds, r);
+        if (boxT < 0.f || boxT >= tMin) continue;  // miss or behind current best
+
+        if (node.triangle_idx >= 0) {
+            // Leaf: test actual triangle
+            glm::vec3 n;
+            float t = triangleIntersect(bvhTriangles[node.triangle_idx], r, n);
+            if (t > 0.f && t < tMin) {
+                tMin      = t;
+                hitNormal = n;
+                materialId = bvhTriangles[node.triangle_idx].materialId;
+            }
+        } else {
+            // Interior: push both children; left child is always at idx+1
+            if (stackPtr + 1 < BVH_STACK_SIZE) {
+                stack[stackPtr++] = idx + 1;
+                stack[stackPtr++] = node.secondChildOffset;
+            }
+        }
     }
-    else
-    {
-        n = glm::normalize(glm::cross(e1, e2));
-    }
 
-    outside = glm::dot(q.direction, n) < 0.0f;
-    if (!outside)
-        n = -n;
+    if (tMin == FLT_MAX) return -1.f;
 
-    intersectionPoint =
-        multiplyMV(tri.transform, glm::vec4(localIntersect, 1.0f));
-    normal =
-        glm::normalize(multiplyMV(tri.invTranspose, glm::vec4(n, 0.0f)));
-
-    return glm::length(r.origin - intersectionPoint);
+    intersectionPoint = r.origin + tMin * r.direction;
+    normal = hitNormal;
+    return tMin;
 }

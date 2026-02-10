@@ -15,7 +15,7 @@ enum GeomType
 {
     SPHERE,
     CUBE,
-    TRIANGLE
+    MESH
 };
 
 struct Ray
@@ -34,16 +34,38 @@ struct Geom
     glm::mat4 transform;
     glm::mat4 inverseTransform;
     glm::mat4 invTranspose;
-
     int meshID;
+    int rootNodeIdx;
+};
 
-    // Triangle coords
+// Represents the axis-aligned bounding box of a BVH node
+struct BVHBounds {
+    glm::vec3 minCorner, maxCorner;
+
+    BVHBounds();
+    BVHBounds(const glm::vec3 &min, const glm::vec3 &max);
+    BVHBounds(const std::vector<glm::vec3> &verts);
+
+    int maximumExtent() const;
+    glm::vec3 Offset(const glm::vec3 &p) const;
+
+    float intersect(const Ray &ray) const;
+};
+
+struct LinearBVHNode {
+    BVHBounds bounds;
+    int triangle_idx = -1;                 // leaf
+    int secondChildOffset = 0;         // interior
+};
+
+struct TriangleVerts {
     glm::vec3 v0;
     glm::vec3 v1;
     glm::vec3 v2;
     glm::vec3 n0;
     glm::vec3 n1;
     glm::vec3 n2;
+    int materialId;
 };
 
 struct Material

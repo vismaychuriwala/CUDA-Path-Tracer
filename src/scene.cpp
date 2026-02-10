@@ -10,6 +10,7 @@
 #include <iostream>
 #include <string>
 #include <unordered_map>
+#include "bvhnode.cpp"
 
 #define TINYOBJLOADER_IMPLEMENTATION // define this in only *one* .cc
 // Optional. define TINYOBJLOADER_USE_MAPBOX_EARCUT gives robust triangulation. Requires C++11
@@ -165,10 +166,37 @@ void Scene::loadFromJSON(const std::string& jsonName)
                 const auto& scal = p["SCALE"];
                 scale = glm::vec3(scal[0], scal[1], scal[2]);
             }
-            Geom boundingBox;
-            boundingBox.type = CUBE;
-            Scene::loadFromOBJ(obj_filename, override_materialid, translation, rotation, scale, mesh_ID, boundingBox);
-            boundingBoxes.push_back(boundingBox);
+            std::vector<TriangleVerts> triangleInfo;
+            Scene::loadFromOBJ(obj_filename, override_materialid, translation, rotation, scale, mesh_ID, triangleInfo);
+            int numTriangles = triangleInfo.size();
+            int numLeafNodes = 0;
+            int totalNodes = 2 * numTriangles - 1;
+            uPtr<BVHNode> bvhTree(recursiveBVHBuild(triangleInfo,
+                                0, numTriangles, &numLeafNodes));
+            std::pair<std::vector<LinearBVHNode>, std::vector<TriangleVerts>> meshBVH(recursiveFlattenBVHTree(bvhTree.get(), totalNodes));
+
+            int nodeOffset = (int)this->bvhNodes.size();
+            int triOffset  = (int)this->bvhTriangles.size();
+
+            for (auto& n : meshBVH.first) {
+                if (n.triangle_idx >= 0)
+                    n.triangle_idx += triOffset;
+                else
+                    n.secondChildOffset += nodeOffset;
+            }
+
+            this->bvhNodes.insert(this->bvhNodes.end(), meshBVH.first.begin(), meshBVH.first.end());
+            this->bvhTriangles.insert(this->bvhTriangles.end(), meshBVH.second.begin(), meshBVH.second.end());
+
+            newGeom.type = MESH;
+            newGeom.rootNodeIdx = nodeOffset;
+            newGeom.materialid = override_materialid >= 0 ? override_materialid : 0;
+            newGeom.meshID = mesh_ID;
+            // vertices are already world-space from loadFromOBJ, so identity transforms
+            newGeom.transform = glm::mat4(1.0f);
+            newGeom.inverseTransform = glm::mat4(1.0f);
+            newGeom.invTranspose = glm::mat4(1.0f);
+            geoms.push_back(newGeom);
             mesh_ID++;
             continue;
         }
@@ -191,8 +219,9 @@ void Scene::loadFromJSON(const std::string& jsonName)
         geoms.push_back(newGeom);
     }
     const auto& cameraData = data["Camera"];
-    Camera& camera = state.camera;
     RenderState& state = this->state;
+    Camera& camera = state.camera;
+
     camera.resolution.x = cameraData["RES"][0];
     camera.resolution.y = cameraData["RES"][1];
     float fovy = cameraData["FOVY"];
@@ -212,11 +241,12 @@ void Scene::loadFromJSON(const std::string& jsonName)
     float fovx = (atan(xscaled) * 180) / PI;
     camera.fov = glm::vec2(fovx, fovy);
 
+    camera.view = glm::normalize(camera.lookAt - camera.position);
+
     camera.right = glm::normalize(glm::cross(camera.view, camera.up));
     camera.pixelLength = glm::vec2(2 * xscaled / (float)camera.resolution.x,
         2 * yscaled / (float)camera.resolution.y);
 
-    camera.view = glm::normalize(camera.lookAt - camera.position);
 
     // Depth-of-Field
     camera.focalDistance = cameraData.value("FOCAL_DISTANCE", 10.0f);
@@ -228,20 +258,8 @@ void Scene::loadFromJSON(const std::string& jsonName)
     std::fill(state.image.begin(), state.image.end(), glm::vec3());
 }
 
-inline void updateAABB(glm::vec3 &minBound,
-                       glm::vec3 &maxBound,
-                       const glm::vec3 &p)
-{
-    minBound.x = glm::min(minBound.x, p.x);
-    minBound.y = glm::min(minBound.y, p.y);
-    minBound.z = glm::min(minBound.z, p.z);
-
-    maxBound.x = glm::max(maxBound.x, p.x);
-    maxBound.y = glm::max(maxBound.y, p.y);
-    maxBound.z = glm::max(maxBound.z, p.z);
-}
 void Scene::loadFromOBJ(const std::string obj_filename, const int override_materialid, const glm::vec3 translation,
-    const glm::vec3 rotation, const glm::vec3 scale, const int mesh_ID, Geom &boundingBox) {
+    const glm::vec3 rotation, const glm::vec3 scale, const int mesh_ID, std::vector<TriangleVerts> &triangleInfo) {
     std::filesystem::path objPath(obj_filename);
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> obj_shapes;
@@ -340,15 +358,11 @@ void Scene::loadFromOBJ(const std::string obj_filename, const int override_mater
                         attrib.vertices[3 * idx2.vertex_index + 1],
                         attrib.vertices[3 * idx2.vertex_index + 2]);
 
-            Geom g{};
-            g.type = TRIANGLE;
+            TriangleVerts g{};
+            // g.type = TRIANGLE;
             g.v0 = transformPos(p0);
             g.v1 = transformPos(p1);
             g.v2 = transformPos(p2);
-
-            updateAABB(minBound, maxBound, g.v0);
-            updateAABB(minBound, maxBound, g.v1);
-            updateAABB(minBound, maxBound, g.v2);
 
             // normals
             if (!attrib.normals.empty() &&
@@ -383,35 +397,34 @@ void Scene::loadFromOBJ(const std::string obj_filename, const int override_mater
                 matID = (int)materials.size();
                 materials.push_back(defaultM);
             }
-            g.materialid = matID;
+            g.materialId = matID;
 
-            // identity transforms
-            g.translation = glm::vec3(0);
-            g.rotation = glm::vec3(0);
-            g.scale = glm::vec3(1);
-            g.transform = glm::mat4(1.0f);
-            g.inverseTransform = glm::mat4(1.0f);
-            g.invTranspose = glm::mat4(1.0f);
-            g.meshID = mesh_ID;
+            // // identity transforms
+            // g.translation = glm::vec3(0);
+            // g.rotation = glm::vec3(0);
+            // g.scale = glm::vec3(1);
+            // g.transform = glm::mat4(1.0f);
+            // g.inverseTransform = glm::mat4(1.0f);
+            // g.invTranspose = glm::mat4(1.0f);
+            // g.meshID = mesh_ID;
 
-            geoms.push_back(g);
+            triangleInfo.push_back(g);
 
             index_offset += fv;
         }
     }
 
-    float EPS = 0.0001;
-    minBound -= EPS;
-    maxBound += EPS;
-    boundingBox.translation = (minBound + maxBound) * 0.5f;
-    boundingBox.scale = maxBound - minBound;
-    boundingBox.rotation = glm::vec3(0.0f);
+    // float EPS = 0.0001;
+    // minBound -= EPS;
+    // maxBound += EPS;
+    // boundingBox.translation = (minBound + maxBound) * 0.5f;
+    // boundingBox.scale = maxBound - minBound;
+    // boundingBox.rotation = glm::vec3(0.0f);
 
-    boundingBox.transform = utilityCore::buildTransformationMatrix(
-    boundingBox.translation, boundingBox.rotation, boundingBox.scale);
-    boundingBox.inverseTransform = glm::inverse(boundingBox.transform);
-    boundingBox.invTranspose = glm::inverseTranspose(boundingBox.transform);
-    boundingBox.meshID = mesh_ID;
-    boundingBox.materialid = 0;
-    // geoms.push_back(boundingBox);
+    // boundingBox.transform = utilityCore::buildTransformationMatrix(
+    // boundingBox.translation, boundingBox.rotation, boundingBox.scale);
+    // boundingBox.inverseTransform = glm::inverse(boundingBox.transform);
+    // boundingBox.invTranspose = glm::inverseTranspose(boundingBox.transform);
+    // boundingBox.meshID = mesh_ID;
+    // boundingBox.materialid = 0;
 }
